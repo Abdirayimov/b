@@ -15,11 +15,11 @@ from langchain.memory import ConversationBufferMemory
 
 # Загрузка переменных окружения
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_TOKEN = os.getenv("OPENAI_API_KEY")
 TELEGRAM_API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 
 # Инициализация асинхронного клиента OpenAI
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = AsyncOpenAI(api_key=OPENAI_API_TOKEN)
 
 # Определение каталогов для файлов
 FILES_DIR = "FILES"
@@ -192,15 +192,30 @@ def load_existing_files(context: ContextTypes.DEFAULT_TYPE):
 def get_default_keyboard():
     return [
         [{"text": "📤 Загрузить файл"}, {"text": "🔍 Поиск в Excel"}, {"text": "📄 Поиск в DOC/PDF"}],
-        [{"text": "📂 Удалить файл"}, {"text": "❓ Задать вопрос"}]
+        [{"text": "❓ Задать вопрос"}]
     ]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     load_existing_files(context)
     await update.message.reply_text(
-        "Привет! Я помогу с данными в Excel, DOC и PDF. Выберите действие:",
+        "Привет! Я помогу с данными в Excel, DOC и PDF. Выберите действие:\n\n"
+        "Fayllarni o‘chirish uchun /delete buyrug‘idan foydalaning.",
         reply_markup={"keyboard": get_default_keyboard(), "resize_keyboard": True, "one_time_keyboard": True}
     )
+
+# /delete buyrug‘i uchun funksiya
+async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'excel_files' not in context.user_data and 'doc_files' not in context.user_data:
+        await update.message.reply_text("Hech qanday yuklangan fayl yo‘q.")
+    else:
+        all_files = []
+        if 'excel_files' in context.user_data:
+            all_files.extend([(file, 'excel') for file in context.user_data['excel_files']])
+        if 'doc_files' in context.user_data:
+            all_files.extend([(file, 'doc') for file in context.user_data['doc_files']])
+        keyboard = [[InlineKeyboardButton(os.path.basename(file[0])[:50], callback_data=f"delete_file_{i}")]
+                    for i, file in enumerate(all_files)]
+        await update.message.reply_text("O‘chirish uchun faylni tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -208,7 +223,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_message = update.message.text
 
             if 'awaiting_question' in context.user_data and context.user_data['awaiting_question']:
-                context.user_data['awaiting_question'] = False
+                context.user_data['awaiting_question'] = False  # Savol-javob rejimidan chiqish
                 question = user_message
                 temp = await update.message.reply_text('⌛')
                 response = await client.chat.completions.create(
@@ -264,18 +279,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     keyboard = [[InlineKeyboardButton(os.path.basename(file)[:50], callback_data=f"doc_file_{i}")] for i, file in enumerate(context.user_data['doc_files'])]
                     await update.message.reply_text("Выберите DOC/PDF файл:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-            elif user_message == "📂 Удалить файл":
-                if 'excel_files' not in context.user_data and 'doc_files' not in context.user_data:
-                    await update.message.reply_text("Нет загруженных файлов для удаления.")
-                else:
-                    all_files = []
-                    if 'excel_files' in context.user_data:
-                        all_files.extend([(file, 'excel') for file in context.user_data['excel_files']])
-                    if 'doc_files' in context.user_data:
-                        all_files.extend([(file, 'doc') for file in context.user_data['doc_files']])
-                    keyboard = [[InlineKeyboardButton(os.path.basename(file[0])[:50], callback_data=f"delete_file_{i}")] for i, file in enumerate(all_files)]
-                    await update.message.reply_text("Выберите файл для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
 
             elif user_message == "❓ Задать вопрос":
                 await update.message.reply_text("Введите ваш вопрос:")
@@ -371,6 +374,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token(TELEGRAM_API_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("delete", delete_file))  # /delete buyrug‘i qo‘shildi
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
