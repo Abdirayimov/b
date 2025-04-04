@@ -160,7 +160,6 @@ async def ask_gpt(question, df):
 
 # Функция для проверки и добавления существующих файлов при запуске бота
 def load_existing_files(context: ContextTypes.DEFAULT_TYPE):
-    # Загрузка Excel файлов
     excel_files = [os.path.join(FILES_DIR, f) for f in os.listdir(FILES_DIR) if f.endswith(('.xlsx', '.xls'))]
     if excel_files:
         if 'excel_files' not in context.user_data:
@@ -173,7 +172,6 @@ def load_existing_files(context: ContextTypes.DEFAULT_TYPE):
                 df = load_data(file_path)
                 context.user_data['excel_data'][file_path] = df
 
-    # Загрузка DOC/PDF файлов
     doc_files = [os.path.join(DOCS_DIR, f) for f in os.listdir(DOCS_DIR) if f.endswith(('.pdf', '.docx', '.doc'))]
     if doc_files:
         if 'doc_files' not in context.user_data:
@@ -192,10 +190,12 @@ def load_existing_files(context: ContextTypes.DEFAULT_TYPE):
 
 # Стандартная клавиатура
 def get_default_keyboard():
-    return [[{"text": "📤 Загрузить файл"}, {"text": "🔍 Поиск в Excel"}, {"text": "📄 Поиск в DOC/PDF"}]]
+    return [
+        [{"text": "📤 Загрузить файл"}, {"text": "🔍 Поиск в Excel"}, {"text": "📄 Поиск в DOC/PDF"}],
+        [{"text": "📂 Удалить файл"}, {"text": "❓ Задать вопрос"}]
+    ]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Загрузка существующих файлов при запуске
     load_existing_files(context)
     await update.message.reply_text(
         "Привет! Я помогу с данными в Excel, DOC и PDF. Выберите действие:",
@@ -207,33 +207,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.text:
             user_message = update.message.text
 
-            if 'selected_excel_file' in context.user_data:
-                selected_file = context.user_data.pop('selected_excel_file')
-                df = context.user_data['excel_data'][selected_file]
+            if 'awaiting_question' in context.user_data and context.user_data['awaiting_question']:
+                context.user_data['awaiting_question'] = False
+                question = user_message
                 temp = await update.message.reply_text('⌛')
-                response = await ask_gpt(user_message, df)
+                response = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": question}],
+                    temperature=0.9,
+                    max_tokens=5000
+                )
+                answer = response.choices[0].message.content
                 await temp.delete()
-                await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+                await update.message.reply_text(answer, parse_mode="Markdown")
 
-            elif 'selected_doc_file' in context.user_data:
-                selected_file = context.user_data.pop('selected_doc_file')
-                db = context.user_data['doc_indices'][selected_file]
-                retriever = db.as_retriever(search_kwargs={"k": 3})
-                relevant_docs = retriever.get_relevant_documents(user_message)
-                context_str = "\n\n".join([doc.page_content for doc in relevant_docs])
-                prompt = (
-                    "Ты — помощник, который отвечает на вопросы на основе предоставленных документов. "
-                    "Используй только следующие фрагменты текста для ответа. "
-                    "Если ответа нет в документах, сообщи об этом.\n\n"
-                    "{context}\n\n"
-                    "Вопрос: {question}\n\n"
-                    "Ответ:"
-                ).format(context=context_str, question=user_message)
-                memory = context.user_data.get('memory', ConversationBufferMemory(memory_key="chat_history", return_messages=True))
-                chat_history = memory.chat_memory.messages if memory.chat_memory.messages else []
-                answer = await processor.get_openai_response(prompt, chat_history)
-                memory.save_context({"question": user_message}, {"answer": answer})
-                await update.message.reply_text(f"🔍 **Ответ:**\n{answer}", parse_mode="Markdown")
+            elif 'current_file' in context.user_data:
+                file_path = context.user_data['current_file']
+                if file_path in context.user_data.get('excel_files', []):
+                    df = context.user_data['excel_data'][file_path]
+                    temp = await update.message.reply_text('⌛')
+                    response = await ask_gpt(user_message, df)
+                    await temp.delete()
+                    await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+                elif file_path in context.user_data.get('doc_files', []):
+                    db = context.user_data['doc_indices'][file_path]
+                    retriever = db.as_retriever(search_kwargs={"k": 3})
+                    relevant_docs = retriever.get_relevant_documents(user_message)
+                    context_str = "\n\n".join([doc.page_content for doc in relevant_docs])
+                    prompt = (
+                        "Ты — помощник, который отвечает на вопросы на основе предоставленных документов. "
+                        "Используй только следующие фрагменты текста для ответа. "
+                        "Если ответа нет в документах, сообщи об этом.\n\n"
+                        "{context}\n\n"
+                        "Вопрос: {question}\n\n"
+                        "Ответ:"
+                    ).format(context=context_str, question=user_message)
+                    memory = context.user_data.get('memory', ConversationBufferMemory(memory_key="chat_history", return_messages=True))
+                    chat_history = memory.chat_memory.messages if memory.chat_memory.messages else []
+                    answer = await processor.get_openai_response(prompt, chat_history)
+                    memory.save_context({"question": user_message}, {"answer": answer})
+                    await update.message.reply_text(f"🔍 **Ответ:**\n{answer}", parse_mode="Markdown")
 
             elif user_message == "📤 Загрузить файл":
                 await update.message.reply_text("Отправьте файл (Excel, DOC или PDF).")
@@ -252,13 +265,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     keyboard = [[InlineKeyboardButton(os.path.basename(file)[:50], callback_data=f"doc_file_{i}")] for i, file in enumerate(context.user_data['doc_files'])]
                     await update.message.reply_text("Выберите DOC/PDF файл:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+            elif user_message == "📂 Удалить файл":
+                if 'excel_files' not in context.user_data and 'doc_files' not in context.user_data:
+                    await update.message.reply_text("Нет загруженных файлов для удаления.")
+                else:
+                    all_files = []
+                    if 'excel_files' in context.user_data:
+                        all_files.extend([(file, 'excel') for file in context.user_data['excel_files']])
+                    if 'doc_files' in context.user_data:
+                        all_files.extend([(file, 'doc') for file in context.user_data['doc_files']])
+                    keyboard = [[InlineKeyboardButton(os.path.basename(file[0])[:50], callback_data=f"delete_file_{i}")] for i, file in enumerate(all_files)]
+                    await update.message.reply_text("Выберите файл для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+            elif user_message == "❓ Задать вопрос":
+                await update.message.reply_text("Введите ваш вопрос:")
+                context.user_data['awaiting_question'] = True
+
             else:
-                await update.message.reply_text("Пожалуйста, сначала выберите тип поиска и файл.")
+                await update.message.reply_text("Пожалуйста, сначала загрузите или выберите файл.")
 
         elif update.message.document:
             file = update.message.document
             file_name = file.file_name
-            # Проверка на дубликаты имен файлов
             base_name, ext = os.path.splitext(file_name)
             counter = 1
             new_file_name = file_name
@@ -281,6 +309,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.user_data['excel_data'] = {}
                 df = load_data(file_path)
                 context.user_data['excel_data'][file_path] = df
+                context.user_data['current_file'] = file_path
                 await update.message.reply_text(f"Excel файл '{new_file_name}' загружен!")
             elif file.mime_type in ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]:
                 chunks = processor.process_document(file_path)
@@ -293,6 +322,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['doc_files'].append(file_path)
                 if 'memory' not in context.user_data:
                     context.user_data['memory'] = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+                context.user_data['current_file'] = file_path
                 await update.message.reply_text(f"DOC/PDF файл '{new_file_name}' загружен!")
             else:
                 await update.message.reply_text("Загружайте только файлы в формате Excel, DOC или PDF.")
@@ -305,14 +335,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     if data.startswith("excel_file_"):
         file_index = int(data.split("_")[2])
-        context.user_data['selected_excel_file'] = context.user_data['excel_files'][file_index]
         selected_file = context.user_data['excel_files'][file_index]
+        context.user_data['current_file'] = selected_file
         await query.edit_message_text(f"Выбран Excel файл: {os.path.basename(selected_file)[:50]}\nВведите запрос:")
     elif data.startswith("doc_file_"):
         file_index = int(data.split("_")[2])
-        context.user_data['selected_doc_file'] = context.user_data['doc_files'][file_index]
         selected_file = context.user_data['doc_files'][file_index]
+        context.user_data['current_file'] = selected_file
         await query.edit_message_text(f"Выбран DOC/PDF файл: {os.path.basename(selected_file)[:50]}\nВведите запрос:")
+    elif data.startswith("delete_file_"):
+        file_index = int(data.split("_")[2])
+        all_files = []
+        if 'excel_files' in context.user_data:
+            all_files.extend([(file, 'excel') for file in context.user_data['excel_files']])
+        if 'doc_files' in context.user_data:
+            all_files.extend([(file, 'doc') for file in context.user_data['doc_files']])
+        file_to_delete, file_type = all_files[file_index]
+        if file_type == 'excel':
+            context.user_data['excel_files'].remove(file_to_delete)
+            del context.user_data['excel_data'][file_to_delete]
+        elif file_type == 'doc':
+            context.user_data['doc_files'].remove(file_to_delete)
+            del context.user_data['doc_indices'][file_to_delete]
+        os.remove(file_to_delete)
+        await query.edit_message_text(f"Файл '{os.path.basename(file_to_delete)}' удалён.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
